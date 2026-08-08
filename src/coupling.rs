@@ -5,10 +5,15 @@
 //!
 //! * **cuerpos -> campo**: al moverse, un cuerpo agita el medio y deposita
 //!   calor proporcional a su energia cinetica especifica.
-//! * **campo -> cuerpos**: el medio caliente devuelve empujones aleatorios.
-//!   La magnitud va como `sqrt(T)` porque la energia es cuadratica en la
-//!   velocidad, y como `sqrt(dt)` porque es ruido blanco integrado: asi la
-//!   agitacion no depende de a cuantos fps vaya la simulacion.
+//! * **campo -> cuerpos**: el medio caliente devuelve empujones aleatorios,
+//!   siguiendo la ecuacion de Langevin. La magnitud va como `sqrt(m*T)`, lo que
+//!   deja la velocidad en `sqrt(T/m)` — equiparticion de energia, y el motivo
+//!   de que las formas pequenas vibren y las grandes casi no se muevan. El
+//!   factor `sqrt(dt)` es el de un ruido blanco integrado, y hace que la
+//!   agitacion no dependa de a cuantos fps vaya la simulacion.
+//!
+//! El termino disipativo de Langevin no esta aqui sino en el `Damping` de cada
+//! cuerpo: sin el, el ruido inyectaria energia sin freno.
 
 use bevy::prelude::*;
 use bevy::render::renderer::{RenderDevice, RenderQueue};
@@ -192,8 +197,7 @@ pub fn apply_brownian_impulse(
         }
 
         let angle = rng.0.random_range(0.0..TAU);
-        let magnitude =
-            config::IMPULSE_SCALE * (mass.get().mass * temperature).sqrt() * dt_scale;
+        let magnitude = config::IMPULSE_SCALE * (mass.get().mass * temperature).sqrt() * dt_scale;
         impulse.impulse += Vec2::new(angle.cos(), angle.sin()) * magnitude;
     }
 }

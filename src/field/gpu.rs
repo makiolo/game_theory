@@ -17,9 +17,8 @@
 use bevy::render::render_resource::{
     BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
     Buffer, BufferBinding, BufferBindingType, BufferDescriptor, BufferUsages,
-    CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline,
-    PipelineLayoutDescriptor, PollType, RawComputePipelineDescriptor, ShaderModuleDescriptor,
-    ShaderSource, ShaderStages,
+    CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, PipelineLayoutDescriptor,
+    PollType, RawComputePipelineDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bytemuck::{Pod, Zeroable};

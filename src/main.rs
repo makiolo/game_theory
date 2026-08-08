@@ -10,6 +10,10 @@
 //!
 //! El acoplamiento entre ambos vive en [`coupling`].
 
+// Los sistemas de Bevy declaran sus dependencias como parametros, asi que pasar
+// de siete es lo normal y no dice nada sobre su complejidad.
+#![allow(clippy::too_many_arguments)]
+
 mod config;
 mod coupling;
 mod field;
