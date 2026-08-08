@@ -1,20 +1,17 @@
 //! Constantes de la simulacion, en un solo sitio para poder afinarla rapido.
-
-use bevy::prelude::Color;
+//!
+//! Solo lo que decide como se mueve el mundo. Lo que decide como se ve —tamano
+//! de ventana, colores— vive en el `config` de la app: la simulacion tiene que
+//! poder correr sin que exista una pantalla.
 
 /// Escala de Rapier: cuantos pixeles de mundo equivalen a un metro fisico.
 pub const PIXELS_PER_METER: f32 = 100.0;
-
-pub const WINDOW_W: u32 = 1280;
-pub const WINDOW_H: u32 = 720;
 
 /// Semi-extension del recinto en pixeles de mundo (el origen esta en el centro).
 pub const ARENA_HALF_W: f32 = 620.0;
 pub const ARENA_HALF_H: f32 = 340.0;
 /// Grosor de los muros; generoso para que nada los atraviese a alta velocidad.
 pub const WALL_THICKNESS: f32 = 20.0;
-
-pub const BACKGROUND: Color = Color::srgb(0.05, 0.05, 0.08);
 
 /// Rebote y rozamiento por defecto de los cuerpos que crea el usuario.
 pub const BODY_RESTITUTION: f32 = 0.75;
@@ -85,15 +82,19 @@ pub const ANGULAR_DAMPING: f32 = 2.0;
 /// el suelo. Dejamos algo de gravedad para que siga habiendo un "abajo".
 pub const GRAVITY_SCALE: f32 = 0.15;
 
-/// Calor que inyecta el boton central del raton, por segundo.
-pub const HEAT_BRUSH: f32 = 400.0;
-
 /// Semilla del RNG: fija para que una misma partida sea reproducible.
 pub const RNG_SEED: u64 = 0x5EED_B12E_1234_5678;
 
-/// Tope al paso de tiempo de la simulacion.
+/// Paso de tiempo de la simulacion.
 ///
-/// Sin el, un frame lento pide un dt mayor, que exige mas sub-pasos de
-/// difusion, que hacen el frame aun mas lento: la espiral clasica. Con el tope
-/// la simulacion se ralentiza respecto al reloj, pero no se atasca.
-pub const MAX_SIM_DT: f32 = 1.0 / 30.0;
+/// Fijo, no el delta del frame. Con un paso variable la trayectoria depende de
+/// lo cargada que este la maquina: dos ejecuciones con la misma semilla
+/// divergen, y un entorno de aprendizaje que no se puede reproducir tampoco se
+/// puede depurar.
+///
+/// De paso desaparece la espiral que antes obligaba a poner un tope — un frame
+/// lento ya no pide mas sub-pasos de difusion. Lo que ocurre ahora es que
+/// `FixedUpdate` acumula el retraso y da varios pasos seguidos, o los descarta
+/// si no llega; la simulacion se separa del reloj de pared, pero cada paso vale
+/// exactamente lo mismo.
+pub const SIM_DT: f32 = 1.0 / 60.0;

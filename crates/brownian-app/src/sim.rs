@@ -1,34 +1,23 @@
-//! El puente entre la fisica de Rapier (CPU, cuerpos rigidos) y la rejilla
-//! termica (paralela, campo continuo).
+//! El paso de la simulacion visto desde Bevy: quien lo dispara, con que backend
+//! y cuanto cuesta.
 //!
-//! Va en los dos sentidos:
-//!
-//! * **cuerpos -> campo**: al moverse, un cuerpo agita el medio y deposita
-//!   calor proporcional a su energia cinetica especifica.
-//! * **campo -> cuerpos**: el medio caliente devuelve empujones aleatorios,
-//!   siguiendo la ecuacion de Langevin. La magnitud va como `sqrt(m*T)`, lo que
-//!   deja la velocidad en `sqrt(T/m)` — equiparticion de energia, y el motivo
-//!   de que las formas pequenas vibren y las grandes casi no se muevan. El
-//!   factor `sqrt(dt)` es el de un ruido blanco integrado, y hace que la
-//!   agitacion no dependa de a cuantos fps vaya la simulacion.
-//!
-//! El termino disipativo de Langevin no esta aqui sino en el `Damping` de cada
-//! cuerpo: sin el, el ruido inyectaria energia sin freno.
+//! El acoplamiento entre cuerpos y campo ya no esta aqui — vive dentro de
+//! [`brownian_core::Env`], que es quien lo encadena. Lo que queda en la app es
+//! decidir *cuando* se da un paso (una vez por tick de `FixedUpdate`), con cual
+//! de los tres backends, y cronometrarlo para el HUD.
 
 use bevy::prelude::*;
 use bevy::render::renderer::{RenderDevice, RenderQueue};
-use bevy_rapier2d::prelude::*;
-use rand::{RngExt, SeedableRng};
-use rand_chacha::ChaCha8Rng;
-use std::f32::consts::TAU;
 use std::time::Instant;
 
+use brownian_core::field::parallel::RayonBackend;
+use brownian_core::field::serial::SerialBackend;
+use brownian_core::{BackendKind, FieldBackend};
+
 use crate::config;
-use crate::field::gpu::GpuBackend;
-use crate::field::parallel::RayonBackend;
-use crate::field::serial::SerialBackend;
-use crate::field::{BackendKind, FieldBackend, ThermalField};
-use crate::spawn::{Agent, cursor_world_position};
+use crate::gpu::GpuBackend;
+use crate::res::{Backend, Sim};
+use crate::spawn::cursor_world_position;
 
 /// Los backends viven aqui para poder cambiar de uno a otro en caliente sin
 /// reconstruir nada.
@@ -83,62 +72,27 @@ pub struct FieldStats {
     pub avg_step_ms: f32,
 }
 
-#[derive(Resource)]
-pub struct BrownianRng(pub ChaCha8Rng);
-
-impl Default for BrownianRng {
-    fn default() -> Self {
-        Self(ChaCha8Rng::seed_from_u64(config::RNG_SEED))
-    }
-}
-
-/// Paso de tiempo que usan los tres sistemas del acoplamiento. Va acotado para
-/// que un frame lento no dispare el numero de sub-pasos del campo.
-fn sim_dt(time: &Time) -> f32 {
-    time.delta_secs().min(config::MAX_SIM_DT)
-}
-
 /// Cambia de backend con la tecla B.
-pub fn cycle_backend(keys: Res<ButtonInput<KeyCode>>, mut kind: ResMut<BackendKind>) {
+pub fn cycle_backend(keys: Res<ButtonInput<KeyCode>>, mut kind: ResMut<Backend>) {
     if keys.just_pressed(KeyCode::KeyB) {
-        *kind = kind.next();
-    }
-}
-
-/// Cuerpos -> campo: el rozamiento con el medio lo calienta.
-pub fn deposit_heat(
-    time: Res<Time>,
-    mut field: ResMut<ThermalField>,
-    agents: Query<(&Transform, &Velocity), With<Agent>>,
-) {
-    let dt = sim_dt(&time);
-    if dt <= 0.0 {
-        return;
-    }
-
-    for (transform, velocity) in &agents {
-        let speed2 = velocity.linear.length_squared();
-        if speed2 <= 0.0 {
-            continue;
-        }
-        let pos = transform.translation.truncate();
-        field.deposit(pos, config::HEAT_PER_SPEED2 * speed2 * dt);
+        **kind = kind.next();
     }
 }
 
 /// Boton central del raton: inyecta calor donde apunta el cursor. Sirve para
 /// ver la difusion y para agitar a mano una zona del recinto.
+///
+/// Va antes del paso, para que el calor que suelta entre en la difusion de este
+/// mismo paso y no en la del siguiente.
 pub fn heat_brush(
-    time: Res<Time>,
     buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform)>,
-    mut field: ResMut<ThermalField>,
+    mut sim: ResMut<Sim>,
 ) {
     if !buttons.pressed(MouseButton::Middle) {
         return;
     }
-    let dt = sim_dt(&time);
     let (Ok(window), Ok((camera, camera_transform))) = (windows.single(), cameras.single()) else {
         return;
     };
@@ -146,25 +100,20 @@ pub fn heat_brush(
         return;
     };
 
-    field.deposit(world, config::HEAT_BRUSH * dt);
+    sim.field
+        .deposit(world, config::HEAT_BRUSH * config::SIM_DT);
 }
 
-/// Avanza la difusion con el backend activo y cronometra el paso.
-pub fn step_field(
-    time: Res<Time>,
-    kind: Res<BackendKind>,
+/// Avanza el mundo un paso con el backend activo, y cronometra el campo.
+pub fn step_sim(
+    kind: Res<Backend>,
     mut backends: ResMut<Backends>,
-    mut field: ResMut<ThermalField>,
+    mut sim: ResMut<Sim>,
     mut stats: ResMut<FieldStats>,
 ) {
-    let dt = sim_dt(&time);
-    if dt <= 0.0 {
-        return;
-    }
-
     let started = Instant::now();
-    let backend = backends.get_mut(*kind);
-    field.step(backend, dt);
+    let backend = backends.get_mut(**kind);
+    sim.step(backend);
     stats.step_ms = started.elapsed().as_secs_f32() * 1000.0;
 
     // Suavizado exponencial: lo que se lee en pantalla tiene que ser estable.
@@ -174,30 +123,4 @@ pub fn step_field(
     } else {
         stats.avg_step_ms * (1.0 - w) + stats.step_ms * w
     };
-}
-
-/// Campo -> cuerpos: el medio caliente los sacude en direccion aleatoria.
-pub fn apply_brownian_impulse(
-    time: Res<Time>,
-    field: Res<ThermalField>,
-    mut rng: ResMut<BrownianRng>,
-    mut agents: Query<(&Transform, &ReadMassProperties, &mut ExternalImpulse), With<Agent>>,
-) {
-    let dt = sim_dt(&time);
-    if dt <= 0.0 {
-        return;
-    }
-    // Ruido blanco integrado sobre dt: la desviacion crece con sqrt(dt).
-    let dt_scale = dt.sqrt();
-
-    for (transform, mass, mut impulse) in &mut agents {
-        let temperature = field.sample(transform.translation.truncate());
-        if temperature <= 0.0 {
-            continue;
-        }
-
-        let angle = rng.0.random_range(0.0..TAU);
-        let magnitude = config::IMPULSE_SCALE * (mass.get().mass * temperature).sqrt() * dt_scale;
-        impulse.impulse += Vec2::new(angle.cos(), angle.sin()) * magnitude;
-    }
 }

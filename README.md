@@ -78,27 +78,46 @@ en torno a 1 ms.
 
 ## Estructura
 
+La simulación vive en una librería sin Bevy, y la app solo la dibuja. La
+separación no es estética: es lo que permite correr el mundo miles de veces en
+paralelo, sin ventana ni GPU, para entrenar sobre él.
+
 ```
-src/
-  config.rs      constantes de la simulación, todas juntas
-  physics.rs     recinto, gravedad y cuerpos iniciales
-  shapes.rs      formas disponibles → collider y malla
-  spawn.rs       ratón y teclado, previsualización, crear y borrar
-  field/
-    mod.rs       ThermalField (ndarray) + trait FieldBackend
-    serial.rs    backend de referencia, una hebra
-    parallel.rs  backend rayon, filas repartidas entre hebras
-    gpu.rs       backend de compute shader
-    diffuse.wgsl el kernel, espejo del núcleo de CPU
-  coupling.rs    el puente entre Rapier y el campo
-  viz.rs         el campo como textura de fondo
-  hud.rs         panel de estado
+crates/
+  brownian-core/          la simulación, sin nada delante
+    config.rs      constantes de la simulación, todas juntas
+    env.rs         el mundo: recinto, cuerpos (rapier2d) y su paso
+    shapes.rs      formas disponibles → collider
+    sim.rs         reloj y ruido reproducible
+    field/
+      mod.rs       ThermalField (ndarray) + trait FieldBackend
+      serial.rs    backend de referencia, una hebra
+      parallel.rs  backend rayon, filas repartidas entre hebras
+
+  brownian-app/           la ventana
+    res.rs         la simulación como recurso de Bevy, y la línea de órdenes
+    sim.rs         cuándo se da un paso, con qué backend y cuánto cuesta
+    spawn.rs       ratón y teclado, previsualización, crear y borrar
+    physics.rs     los sprites del recinto y los cuerpos iniciales
+    shapes.rs      el aspecto de cada forma: malla, color y contorno
+    debug.rs       contornos de los colliders (F3)
+    viz.rs         el campo como textura de fondo
+    hud.rs         panel de estado
+    gpu.rs         backend de compute shader
+    diffuse.wgsl   el kernel, espejo del núcleo de CPU
 ```
+
+## Hacia dónde va
+
+El siguiente paso es convertir el sandbox en un entorno de aprendizaje por
+refuerzo multi-agente, con la simulación extraída a una librería sin Bevy y
+expuesta a PyTorch sin copias. El plan completo está en
+[`docs/rl-integration-plan.md`](docs/rl-integration-plan.md).
 
 ## Tests
 
 ```sh
-cargo test
+cargo test --workspace
 ```
 
 Cubren lo que puede romperse en silencio: que la difusión conserve el calor con
@@ -109,12 +128,30 @@ mapeo mundo↔celda sea correcto en los bordes.
 
 ## Notas de implementación
 
+- **El paso de simulación es fijo, no el del frame.** Todo lo que avanza el
+  mundo —Rapier, la difusión y el acoplamiento— vive en `FixedUpdate` con un
+  `dt` constante. Con el paso atado al frame, la trayectoria dependía de lo
+  cargada que estuviera la máquina y dos ejecuciones con la misma semilla
+  divergían.
+- **El ruido browniano se direcciona, no se consume.** La sacudida de un cuerpo
+  es una función pura de `(semilla, paso, slot)` en vez de la siguiente palabra
+  de un generador compartido. Así no depende del orden en que el ECS recorra los
+  cuerpos, que no está garantizado, ni de cuántas hebras haya.
 - **`wgpu` no es una dependencia directa.** Bevy usa wgpu 29 por dentro y
   crates.io va por la 30; declararlo aparte crearía un segundo `Device` con
   tipos incompatibles. El backend de GPU usa el `RenderDevice` que Bevy ya tiene
   abierto.
 - **Rapier resuelve la física en CPU.** No hay backend de GPU para su
   broad-phase ni su solver; lo que se paraleliza aquí es el campo.
+- **Rapier se usa directamente, sin el plugin de Bevy.** `rapier2d` es el motor
+  oficial de Dimforge, el mismo que `bevy_rapier2d` monta por dentro; usarlo a
+  pelo es lo que permite que la simulación no dependa de que exista una ventana.
+  Desde la 0.33 trabaja en glam, y su `Vector` es el mismo `Vec2` que usa Bevy,
+  así que los vectores cruzan la frontera sin conversión.
+- **Borrar por punto recorre los cuerpos, no consulta el broad-phase.** Ese
+  árbol no conoce a un cuerpo hasta que pasa por el `PhysicsPipeline`, así que
+  una consulta espacial no encuentra lo que se acaba de crear — con el ratón,
+  un cuerpo recién soltado quedaba inmune al clic derecho.
 - **Rapier trabaja en píxeles, no en metros.** `pixels_per_meter` ajusta la
   escala de la simulación pero no encoge la geometría, así que una pelota de
   18 px de radio tiene masa ≈1018, no 0.1 — de ahí las constantes grandes en

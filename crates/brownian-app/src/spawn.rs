@@ -1,18 +1,23 @@
 //! Interaccion con el raton y el teclado: elegir forma, previsualizarla y
 //! crear o borrar cuerpos.
+//!
+//! Desde que la fisica vive en [`brownian_core`], una entidad de Bevy aqui es
+//! solo la parte visible de un agente: malla, material y `Transform`. El cuerpo
+//! —masa, collider, velocidad— esta en el `Env`, y el vinculo entre ambos es el
+//! slot que guarda [`Agent`].
 
 use bevy::prelude::*;
-use bevy_rapier2d::prelude::*;
+use brownian_core::ShapeKind;
 
 use crate::config;
-use crate::field::ThermalField;
-use crate::physics::Wall;
-use crate::shapes::ShapeKind;
+use crate::res::Sim;
+use crate::shapes::ShapeVisuals;
 
-/// Marca los cuerpos creados por el usuario: son los que se acoplan al campo
-/// termico y los que cuenta el HUD.
-#[derive(Component)]
-pub struct Agent;
+/// La parte visible de un agente. El `slot` es su identidad dentro del `Env`.
+#[derive(Component, Clone, Copy)]
+pub struct Agent {
+    pub slot: u32,
+}
 
 /// La silueta que sigue al cursor mostrando que se va a crear.
 #[derive(Component)]
@@ -39,44 +44,40 @@ impl Default for SpawnSettings {
 pub const MIN_SIZE: f32 = 6.0;
 pub const MAX_SIZE: f32 = 60.0;
 
-/// Crea un cuerpo dinamico completo: malla, collider y los componentes que
-/// necesita el acoplamiento termico. Es el unico sitio donde se define de que
-/// se compone un agente, para que los del arranque y los del raton sean iguales.
+/// Crea un agente: el cuerpo en la simulacion y su representacion en el ECS.
+/// Es el unico sitio donde se atan los dos, para que no puedan separarse.
 pub fn spawn_body(
     commands: &mut Commands,
+    sim: &mut Sim,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<ColorMaterial>,
     shape: ShapeKind,
     size: f32,
     position: Vec2,
 ) -> Entity {
+    let slot = sim.spawn(shape, size, position);
+
     commands
         .spawn((
-            Agent,
+            Agent { slot },
             Mesh2d(meshes.add(shape.mesh(size))),
             MeshMaterial2d(materials.add(shape.color())),
             Transform::from_xyz(position.x, position.y, 1.0),
-            RigidBody::Dynamic,
-            shape.collider(size),
-            Restitution::coefficient(config::BODY_RESTITUTION),
-            Friction::coefficient(config::BODY_FRICTION),
-            Damping {
-                linear_damping: config::LINEAR_DAMPING,
-                angular_damping: config::ANGULAR_DAMPING,
-            },
-            Velocity::zero(),
-            ExternalImpulse::default(),
-            // El impulso browniano necesita la masa del cuerpo, que Rapier
-            // calcula a partir del collider y publica aqui.
-            ReadMassProperties::default(),
-            // En un bano termico ningun cuerpo esta nunca del todo en reposo:
-            // si Rapier los durmiera, dejarian de temblar al asentarse.
-            Sleeping::disabled(),
-            // Con la agitacion alta los cuerpos pequenos alcanzan velocidades
-            // a las que podrian colarse entre muros de un paso al siguiente.
-            Ccd::enabled(),
         ))
         .id()
+}
+
+/// Lleva a los `Transform` lo que ha calculado la simulacion. Cierra el frame:
+/// sin esto las mallas se quedarian donde nacieron.
+pub fn sync_transforms(sim: Res<Sim>, mut agents: Query<(&Agent, &mut Transform)>) {
+    for (agent, mut transform) in &mut agents {
+        let Some(pose) = sim.agent_pose(agent.slot) else {
+            continue;
+        };
+        transform.translation.x = pose.position.x;
+        transform.translation.y = pose.position.y;
+        transform.rotation = Quat::from_rotation_z(pose.angle);
+    }
 }
 
 /// Posicion del cursor en coordenadas de mundo.
@@ -165,6 +166,7 @@ pub fn spawn_on_click(
     time: Res<Time>,
     buttons: Res<ButtonInput<MouseButton>>,
     mut settings: ResMut<SpawnSettings>,
+    mut sim: ResMut<Sim>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -199,6 +201,7 @@ pub fn spawn_on_click(
     let (shape, size) = (settings.shape, settings.size);
     spawn_body(
         &mut commands,
+        &mut sim,
         &mut meshes,
         &mut materials,
         shape,
@@ -207,14 +210,18 @@ pub fn spawn_on_click(
     );
 }
 
-/// Boton derecho: borra el cuerpo bajo el cursor, pero nunca los muros.
+/// Boton derecho: borra el cuerpo bajo el cursor.
+///
+/// Quien decide que hay debajo es la consulta espacial del `Env`, que ademas
+/// deja fuera los muros por construccion. Aqui solo queda retirar las mallas de
+/// los slots que se han llevado.
 pub fn despawn_on_click(
     mut commands: Commands,
     buttons: Res<ButtonInput<MouseButton>>,
+    mut sim: ResMut<Sim>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform)>,
-    rapier: ReadRapierContext,
-    walls: Query<(), With<Wall>>,
+    agents: Query<(Entity, &Agent)>,
 ) {
     if !buttons.pressed(MouseButton::Right) {
         return;
@@ -229,33 +236,32 @@ pub fn despawn_on_click(
     let Some(world) = cursor_world_position(window, camera, camera_transform) else {
         return;
     };
-    let Ok(context) = rapier.single() else {
+
+    let removed = sim.despawn_at(world);
+    if removed.is_empty() {
         return;
-    };
+    }
 
-    // La consulta recorre los colliders por callback, asi que recogemos primero
-    // y borramos despues: no conviene tocar el mundo mientras se itera.
-    let mut targets = Vec::new();
-    context.intersect_point(world, QueryFilter::default(), |entity| {
-        if !walls.contains(entity) {
-            targets.push(entity);
+    for (entity, agent) in &agents {
+        if removed.contains(&agent.slot) {
+            commands.entity(entity).despawn();
         }
-        true
-    });
-
-    for entity in targets {
-        commands.entity(entity).despawn();
     }
 }
 
 /// Tecla R: deja el recinto como al principio, sin cuerpos y con el medio frio.
 /// Enfriar el campo tambien es parte del reset: si no, el calor acumulado
 /// seguiria sacudiendo a los cuerpos nuevos.
+///
+/// Es el equivalente manual del `reset(seed)` que pedira el entorno de
+/// aprendizaje, y por eso reinicia tambien el reloj: dos episodios que arrancan
+/// con la misma semilla tienen que recibir el mismo ruido, y no lo harian si el
+/// contador de pasos siguiera donde lo dejo el anterior.
 pub fn reset_scene(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     agents: Query<Entity, With<Agent>>,
-    mut field: ResMut<ThermalField>,
+    mut sim: ResMut<Sim>,
 ) {
     if !keys.just_pressed(KeyCode::KeyR) {
         return;
@@ -263,5 +269,70 @@ pub fn reset_scene(
     for entity in &agents {
         commands.entity(entity).despawn();
     }
-    field.clear();
+    sim.clear_agents();
+    sim.field.clear();
+    sim.clock.reset(config::RNG_SEED);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use brownian_core::Env;
+    use brownian_core::field::serial::SerialBackend;
+
+    /// El puente entre lo que se simula y lo que se ve. Si se rompe, los cuerpos
+    /// siguen moviendose en el `Env` y las mallas se quedan clavadas donde
+    /// nacieron: un fallo que no da error por ningun lado y que solo se nota
+    /// mirando la ventana.
+    #[test]
+    fn transforms_follow_the_simulation() {
+        let mut sim = Sim(Env::new(64, 36, 1));
+        let slot = sim.spawn(ShapeKind::Ball, 18.0, Vec2::new(0.0, 200.0));
+        let start = sim.agent_position(slot).expect("recien creado");
+
+        let mut backend = SerialBackend;
+        for _ in 0..120 {
+            sim.step(&mut backend);
+        }
+        let moved = sim.agent_position(slot).expect("sigue vivo");
+        assert_ne!(start, moved, "el cuerpo no se movio: el test no prueba nada");
+
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                Agent { slot },
+                Transform::from_xyz(start.x, start.y, 1.0),
+            ))
+            .id();
+        world.insert_resource(sim);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(sync_transforms);
+        schedule.run(&mut world);
+
+        let transform = world.get::<Transform>(entity).expect("la entidad sigue ahi");
+        assert_eq!(
+            transform.translation.truncate(),
+            moved,
+            "la malla no siguio al cuerpo"
+        );
+        // La z no la toca nadie: es la capa de dibujo, no parte de la fisica.
+        assert_eq!(transform.translation.z, 1.0);
+    }
+
+    /// Borrar con el raton tiene que llevarse las dos mitades del agente. Si se
+    /// queda la entidad, aparece una malla fantasma que ya no se mueve.
+    #[test]
+    fn despawning_removes_body_and_mesh_together() {
+        let mut sim = Sim(Env::new(64, 36, 1));
+        let slot = sim.spawn(ShapeKind::Square, 20.0, Vec2::ZERO);
+
+        let removed = sim.despawn_at(Vec2::ZERO);
+        assert_eq!(removed, vec![slot]);
+        assert_eq!(sim.agent_count(), 0);
+        assert!(
+            sim.agent_pose(slot).is_none(),
+            "el slot borrado sigue publicando pose, y la malla lo seguiria"
+        );
+    }
 }

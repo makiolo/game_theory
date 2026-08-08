@@ -1,4 +1,4 @@
-use bevy::prelude::Vec2;
+use glam::Vec2;
 use ndarray::Array2;
 
 use super::parallel::RayonBackend;

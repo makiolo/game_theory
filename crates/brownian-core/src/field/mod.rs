@@ -16,14 +16,13 @@
 //! ([`diffuse_row`]), de modo que la comparativa mide el paralelismo y no
 //! diferencias de modelo.
 
-pub mod gpu;
 pub mod parallel;
 pub mod serial;
 
 #[cfg(test)]
 mod tests;
 
-use bevy::prelude::*;
+use glam::Vec2;
 use ndarray::Array2;
 
 use crate::config;
@@ -78,7 +77,7 @@ pub trait FieldBackend: Send + Sync {
 }
 
 /// Cual de los backends esta activo; se cicla en caliente con una tecla.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum BackendKind {
     #[default]
     Serial,
@@ -103,28 +102,9 @@ impl BackendKind {
             _ => None,
         }
     }
-
-    /// Backend inicial, tomado de `--backend <serial|rayon|gpu>` si se pasa.
-    /// Permite arrancar directamente en uno concreto para medirlo, sin tener
-    /// que ciclar con la tecla B.
-    pub fn from_args() -> Self {
-        let mut args = std::env::args().skip(1);
-        while let Some(arg) = args.next() {
-            if arg != "--backend" {
-                continue;
-            }
-            let Some(name) = args.next() else { break };
-            match Self::parse(&name) {
-                Some(kind) => return kind,
-                None => warn!("backend desconocido: {name}; se usa el de por defecto"),
-            }
-        }
-        Self::default()
-    }
 }
 
 /// El campo de temperatura y su doble buffer.
-#[derive(Resource)]
 pub struct ThermalField {
     pub width: usize,
     pub height: usize,
@@ -144,10 +124,20 @@ pub struct ThermalField {
 
 impl Default for ThermalField {
     fn default() -> Self {
-        let (w, h) = grid_size_from_args();
+        Self::with_grid(config::GRID_W, config::GRID_H)
+    }
+}
+
+impl ThermalField {
+    /// El campo por defecto con otra resolucion de rejilla.
+    ///
+    /// Poder cambiarla sin recompilar es lo que hace practico comparar los
+    /// backends: con rejillas pequenas la GPU pierde contra la CPU porque domina
+    /// el coste de subir y bajar los datos, y su ventaja solo se ve al crecer.
+    pub fn with_grid(width: usize, height: usize) -> Self {
         Self::new(
-            w,
-            h,
+            width,
+            height,
             config::ARENA_HALF_W,
             config::ARENA_HALF_H,
             config::ALPHA,
@@ -155,34 +145,6 @@ impl Default for ThermalField {
             config::AMBIENT,
         )
     }
-}
-
-/// Tamano de rejilla, de `--grid <ancho>x<alto>` si se pasa.
-///
-/// Poder cambiarlo sin recompilar es lo que hace practico comparar los backends:
-/// con rejillas pequenas la GPU pierde contra la CPU porque domina el coste de
-/// subir y bajar los datos, y solo se ve su ventaja al crecer.
-fn grid_size_from_args() -> (usize, usize) {
-    let default = (config::GRID_W, config::GRID_H);
-    let mut args = std::env::args().skip(1);
-
-    while let Some(arg) = args.next() {
-        if arg != "--grid" {
-            continue;
-        }
-        let Some(spec) = args.next() else { break };
-        let parsed = spec.split_once(['x', 'X']).and_then(|(w, h)| {
-            let w = w.trim().parse::<usize>().ok()?;
-            let h = h.trim().parse::<usize>().ok()?;
-            (w >= 2 && h >= 2).then_some((w, h))
-        });
-        match parsed {
-            Some(dims) => return dims,
-            None => warn!("rejilla invalida: {spec}; se espera algo como 1024x576"),
-        }
-    }
-
-    default
 }
 
 impl ThermalField {

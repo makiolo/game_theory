@@ -2,11 +2,10 @@
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
-use bevy_rapier2d::prelude::Velocity;
 
-use crate::coupling::{Backends, FieldStats};
-use crate::field::{BackendKind, ThermalField};
-use crate::spawn::{Agent, SpawnSettings};
+use crate::res::{Backend, Sim};
+use crate::sim::{Backends, FieldStats};
+use crate::spawn::SpawnSettings;
 
 #[derive(Component)]
 pub struct HudText;
@@ -31,26 +30,20 @@ pub fn setup_hud(mut commands: Commands) {
 
 pub fn update_hud(
     settings: Res<SpawnSettings>,
-    kind: Res<BackendKind>,
+    kind: Res<Backend>,
     backends: Res<Backends>,
     stats: Res<FieldStats>,
-    field: Res<ThermalField>,
+    sim: Res<Sim>,
     diagnostics: Res<DiagnosticsStore>,
-    agents: Query<&Velocity, With<Agent>>,
     mut text: Query<&mut Text, With<HudText>>,
 ) {
     let Ok(mut text) = text.single_mut() else {
         return;
     };
 
-    // La velocidad media es la forma directa de ver si el bano termico esta
-    // agitando de verdad a los cuerpos: con el medio frio tiende a cero.
-    let count = agents.iter().count();
-    let mean_speed = if count == 0 {
-        0.0
-    } else {
-        agents.iter().map(|v| v.linear.length()).sum::<f32>() / count as f32
-    };
+    let field = &sim.field;
+    let count = sim.agent_count();
+    let mean_speed = sim.mean_speed();
 
     let fps = diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FPS)
@@ -78,7 +71,7 @@ pub fn update_hud(
         field.width,
         field.height,
         field.width * field.height,
-        backends.name(*kind),
+        backends.name(**kind),
         stats.avg_step_ms,
         field.mean_temperature(),
         field.ambient,

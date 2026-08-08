@@ -1,31 +1,22 @@
-//! Recinto estatico y cuerpos iniciales.
+//! Lo visible del recinto, y los cuerpos con los que arranca la escena.
+//!
+//! Los cuatro colliders que cierran el recinto los monta el propio `Env` al
+//! construirse. Aqui solo quedan los sprites que los hacen visibles: sin ellos
+//! el recinto existiria igual, pero no se veria donde termina.
 
 use bevy::prelude::*;
-use bevy_rapier2d::prelude::*;
+use brownian_core::ShapeKind;
 
 use crate::config;
-use crate::shapes::ShapeKind;
+use crate::res::Sim;
 use crate::spawn::spawn_body;
 
-/// Marca los muros del recinto para poder distinguirlos de los cuerpos del usuario.
-#[derive(Component)]
-pub struct Wall;
-
-/// Baja la gravedad al nivel en el que la agitacion termica puede competir
-/// con el peso. Ver [`config::GRAVITY_SCALE`].
-pub fn setup_gravity(mut rapier_config: Query<&mut RapierConfiguration>) -> Result<()> {
-    let mut rapier_config = rapier_config.single_mut()?;
-    rapier_config.gravity.y *= config::GRAVITY_SCALE;
-    Ok(())
-}
-
-/// Cuatro colliders estaticos formando una caja cerrada alrededor del origen.
 pub fn setup_arena(mut commands: Commands) {
     let hw = config::ARENA_HALF_W;
     let hh = config::ARENA_HALF_H;
     let t = config::WALL_THICKNESS;
 
-    // (posicion, semi-extension) de suelo, techo, muro izquierdo y muro derecho.
+    // Las mismas cuatro posiciones y semi-extensiones que usa `Env::build_arena`.
     let walls = [
         (Vec2::new(0.0, -hh - t), Vec2::new(hw + t, t)),
         (Vec2::new(0.0, hh + t), Vec2::new(hw + t, t)),
@@ -35,17 +26,12 @@ pub fn setup_arena(mut commands: Commands) {
 
     for (pos, half) in walls {
         commands.spawn((
-            Wall,
-            // Sin malla los muros serian invisibles: el sprite solo esta para
-            // que se vea donde termina el recinto.
             Sprite {
                 color: Color::srgb(0.22, 0.23, 0.30),
                 custom_size: Some(half * 2.0),
                 ..default()
             },
             Transform::from_xyz(pos.x, pos.y, 0.0),
-            Collider::cuboid(half.x, half.y),
-            Restitution::coefficient(config::BODY_RESTITUTION),
         ));
     }
 }
@@ -53,6 +39,7 @@ pub fn setup_arena(mut commands: Commands) {
 /// Unas cuantas pelotas para que al arrancar ya haya algo cayendo.
 pub fn spawn_initial_balls(
     mut commands: Commands,
+    mut sim: ResMut<Sim>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
@@ -62,6 +49,7 @@ pub fn spawn_initial_balls(
 
         spawn_body(
             &mut commands,
+            &mut sim,
             &mut meshes,
             &mut materials,
             ShapeKind::Ball,

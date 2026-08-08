@@ -1,0 +1,33 @@
+[workspace]
+members = ["crates/brownian-core", "crates/brownian-app"]
+resolver = "3"
+
+# `cargo run` sin `-p`: el unico binario del workspace es la app. Los tests de
+# la libreria piden `--workspace` de forma explicita.
+default-members = ["crates/brownian-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+brownian-core = { path = "crates/brownian-core" }
+
+bevy = "0.19.0"
+bytemuck = "1.25.2"
+glam = "0.32"
+ndarray = { version = "0.17.2", features = ["rayon"] }
+# El motor oficial de Dimforge. Sin la feature `parallel` a proposito: reparte
+# el solver entre hebras y no garantiza el mismo resultado dos veces. Lo que se
+# paraleliza en este proyecto es el campo, y mas adelante los entornos; la
+# fisica de contacto, no.
+rapier2d = "=0.33.0-alpha"
+rayon = "1.12.0"
+
+# Bevy es inutilizable en un perfil dev sin optimizar: los propios crates se
+# compilan con opt-level 1 (iteracion rapida) y todas las dependencias con 3.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

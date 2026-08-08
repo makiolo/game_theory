@@ -26,7 +26,7 @@ use ndarray::Array2;
 use std::borrow::Cow;
 use std::num::NonZeroU64;
 
-use super::{DiffusionParams, FieldBackend};
+use brownian_core::{DiffusionParams, FieldBackend};
 
 /// Lado del grupo de trabajo; tiene que coincidir con el `@workgroup_size` del
 /// shader.

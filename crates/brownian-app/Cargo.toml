@@ -1,21 +1,11 @@
 [package]
 name = "brownian"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-bevy = "0.19.0"
-bevy_rapier2d = { version = "0.35.0", features = ["parallel"] }
-bytemuck = "1.25.2"
-ndarray = { version = "0.17.2", features = ["rayon"] }
-rand = "0.10.2"
-rand_chacha = "0.10.0"
-rayon = "1.12.0"
+brownian-core = { workspace = true }
 
-# Bevy es inutilizable en un perfil dev sin optimizar: el propio crate se compila
-# con opt-level 1 (iteracion rapida) y todas las dependencias con 3.
-[profile.dev]
-opt-level = 1
-
-[profile.dev.package."*"]
-opt-level = 3
+bevy = { workspace = true }
+bytemuck = { workspace = true }
+ndarray = { workspace = true }

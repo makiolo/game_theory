@@ -1,0 +1,13 @@
+[package]
+name = "brownian-core"
+version.workspace = true
+edition.workspace = true
+
+# La simulacion, sin nada que dependa de que haya una ventana delante. Es lo que
+# consumen tanto la app como (mas adelante) el binding de Python: no aparece
+# `bevy` por ningun lado, y esa ausencia es el punto.
+[dependencies]
+glam = { workspace = true }
+ndarray = { workspace = true }
+rapier2d = { workspace = true }
+rayon = { workspace = true }

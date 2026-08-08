@@ -1,25 +1,25 @@
 //! brownian — sandbox de agentes con fisica de contacto sobre un medio termico.
 //!
-//! Dos simulaciones acopladas conviven aqui:
+//! Este binario es la parte visible: ventana, entrada del raton, mallas y HUD.
+//! La simulacion —cuerpos rigidos sobre `rapier2d` y campo de temperatura— vive
+//! entera en [`brownian_core`], y aqui solo se le dice cuando dar un paso y se
+//! dibuja el resultado.
 //!
-//! * **cuerpos rigidos** (Rapier, CPU): colisiones, rebotes y apilamiento de las
-//!   formas que crea el usuario;
-//! * **campo de temperatura** (rejilla 2D): un medio continuo que se difunde y
-//!   que se recorre con backends intercambiables — serie o rayon — para poder
-//!   comparar en caliente lo que cuesta paralelizarlo.
-//!
-//! El acoplamiento entre ambos vive en [`coupling`].
+//! El unico backend del campo que se queda en la app es el de GPU, porque
+//! necesita el dispositivo que abre Bevy.
 
 // Los sistemas de Bevy declaran sus dependencias como parametros, asi que pasar
 // de siete es lo normal y no dice nada sobre su complejidad.
 #![allow(clippy::too_many_arguments)]
 
 mod config;
-mod coupling;
-mod field;
+mod debug;
+mod gpu;
 mod hud;
 mod physics;
+mod res;
 mod shapes;
+mod sim;
 mod spawn;
 mod viz;
 
@@ -27,9 +27,8 @@ use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::input::common_conditions::input_just_pressed;
 use bevy::prelude::*;
 use bevy::window::{MonitorSelection, WindowPosition, WindowResolution};
-use bevy_rapier2d::prelude::*;
 
-use field::{BackendKind, ThermalField};
+use res::{Backend, DebugRender, Sim};
 
 fn main() {
     App::new()
@@ -46,26 +45,21 @@ fn main() {
                 ..default()
             }),
             FrameTimeDiagnosticsPlugin::default(),
-            RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(config::PIXELS_PER_METER),
-            // Arranca apagado: los cuerpos ya se ven por su malla, y los
-            // contornos de los colliders son para depurar (F3).
-            RapierDebugRenderPlugin {
-                enabled: false,
-                ..default()
-            },
         ))
         .insert_resource(ClearColor(config::BACKGROUND))
-        .init_resource::<ThermalField>()
-        .insert_resource(BackendKind::from_args())
-        .init_resource::<coupling::FieldStats>()
-        .init_resource::<coupling::BrownianRng>()
+        // El tick fijo tiene que valer lo mismo que el paso con el que integran
+        // el campo y la fisica; si no, el tiempo simulado se separaria del real.
+        .insert_resource(Time::<Fixed>::from_hz(1.0 / config::SIM_DT as f64))
+        .init_resource::<Sim>()
+        .init_resource::<Backend>()
+        .init_resource::<DebugRender>()
+        .init_resource::<sim::FieldStats>()
         .init_resource::<spawn::SpawnSettings>()
         .add_systems(
             Startup,
             (
                 setup_camera,
-                coupling::setup_backends,
-                physics::setup_gravity,
+                sim::setup_backends,
                 physics::setup_arena,
                 physics::spawn_initial_balls,
                 viz::setup_field_texture,
@@ -81,32 +75,28 @@ fn main() {
                 spawn::spawn_on_click,
                 spawn::despawn_on_click,
                 spawn::reset_scene,
-                coupling::cycle_backend,
-                toggle_debug_render.run_if(input_just_pressed(KeyCode::F3)),
+                sim::cycle_backend,
+                debug::toggle_debug_render.run_if(input_just_pressed(KeyCode::F3)),
             ),
         )
         .add_systems(
-            Update,
-            // El campo va encadenado: los cuerpos lo calientan, difunde, y el
-            // resultado los sacude. Encadenarlo evita leer un campo a medio
-            // actualizar y hace la simulacion reproducible.
+            FixedUpdate,
+            // Un paso de simulacion, encadenado: el pincel deposita antes de que
+            // el campo difunda, el mundo avanza, y lo que salga se lleva a los
+            // `Transform` y a la textura. Encadenarlo evita dibujar un estado a
+            // medio actualizar.
             (
-                coupling::deposit_heat,
-                coupling::heat_brush,
-                coupling::step_field,
-                coupling::apply_brownian_impulse,
+                sim::heat_brush,
+                sim::step_sim,
+                spawn::sync_transforms,
                 viz::update_field_texture,
             )
                 .chain(),
         )
-        .add_systems(Update, hud::update_hud)
+        .add_systems(Update, (hud::update_hud, debug::draw_colliders))
         .run();
 }
 
 fn setup_camera(mut commands: Commands) {
     commands.spawn(Camera2d);
-}
-
-fn toggle_debug_render(mut debug: ResMut<DebugRenderContext>) {
-    debug.enabled = !debug.enabled;
 }

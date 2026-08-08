@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::config;
-use crate::field::ThermalField;
+use crate::res::Sim;
 
 /// Rango minimo de la escala de color: por debajo de este exceso sobre el fondo
 /// no merece la pena estirar el contraste, seria amplificar ruido.
@@ -27,8 +27,9 @@ pub struct FieldTexture {
 pub fn setup_field_texture(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
-    field: Res<ThermalField>,
+    sim: Res<Sim>,
 ) {
+    let field = &sim.field;
     let mut image = Image::new_fill(
         Extent3d {
             width: field.width as u32,
@@ -67,10 +68,11 @@ pub fn setup_field_texture(
 }
 
 pub fn update_field_texture(
-    field: Res<ThermalField>,
+    sim: Res<Sim>,
     mut texture: ResMut<FieldTexture>,
     mut images: ResMut<Assets<Image>>,
 ) {
+    let field = &sim.field;
     let data = field.data();
     let ambient = field.ambient;
 
