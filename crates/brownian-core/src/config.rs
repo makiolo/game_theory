@@ -82,6 +82,32 @@ pub const ANGULAR_DAMPING: f32 = 2.0;
 /// el suelo. Dejamos algo de gravedad para que siga habiendo un "abajo".
 pub const GRAVITY_SCALE: f32 = 0.15;
 
+// --- Aprendizaje ------------------------------------------------------------
+
+/// Aceleracion que puede imprimirse un agente a si mismo, en pixeles/s^2, con la
+/// accion a fondo.
+///
+/// Va como aceleracion y no como impulso, es decir escalada por la masa: asi
+/// todos los tamanos tienen la misma autoridad sobre si mismos, mientras que el
+/// ruido termico —que va como `sqrt(T/m)`— zarandea mucho mas a los pequenos.
+/// De esa asimetria sale lo interesante de la tarea: un cuerpo grande se dirige
+/// con facilidad pero le cuesta arrancar, y uno pequeno es agil y a la vez
+/// esclavo del ruido.
+///
+/// Con [`LINEAR_DAMPING`] deja la velocidad de crucero en unos 160 px/s,
+/// comparable a la que alcanza una pelota de 18 px solo por agitacion termica.
+/// Si la accion pudiera mucho mas que el bano, la politica aprenderia a ignorar
+/// el medio, que es justo lo que hay que evitar.
+pub const ACTION_ACCEL: f32 = 400.0;
+
+/// Pasos que dura un episodio antes de truncarse (60 s a [`SIM_DT`]).
+pub const MAX_EPISODE_STEPS: u64 = 3_600;
+
+/// Escala con la que se normaliza el exceso de temperatura al convertirlo en
+/// recompensa. Deja la senal en un rango cercano a [0, 1] para lo que se ve
+/// normalmente en una celda caliente, sin recortarla.
+pub const REWARD_TEMPERATURE_SCALE: f32 = 4.0;
+
 /// Semilla del RNG: fija para que una misma partida sea reproducible.
 pub const RNG_SEED: u64 = 0x5EED_B12E_1234_5678;
 

@@ -33,6 +33,9 @@ use crate::field::{FieldBackend, ThermalField};
 use crate::shapes::ShapeKind;
 use crate::sim::{SimClock, noise_angle, stream};
 
+/// Componentes de la accion de un agente: un empujon en el plano.
+pub const ACTION_DIM: usize = 2;
+
 /// Lo que hace falta saber de un agente para dibujarlo.
 #[derive(Clone, Copy, Debug)]
 pub struct AgentPose {
@@ -94,6 +97,12 @@ impl Agents {
         self.handle.len() - self.free.len()
     }
 
+    /// Slots repartidos alguna vez, vivos o no. Es el `N` de los tensores que
+    /// cruzan la frontera, porque van indexados por slot.
+    fn capacity(&self) -> usize {
+        self.handle.len()
+    }
+
     fn clear(&mut self) {
         self.handle.clear();
         self.shape.clear();
@@ -108,6 +117,8 @@ pub struct Env {
     pub clock: SimClock,
 
     agents: Agents,
+    /// Recompensa del ultimo paso, indexada por slot.
+    rewards: Vec<f32>,
 
     // Los sets de rapier, tal cual los pide `PhysicsPipeline::step`.
     bodies: RigidBodySet,
@@ -147,6 +158,7 @@ impl Env {
                 ..Default::default()
             },
             agents: Agents::default(),
+            rewards: Vec::new(),
             bodies: RigidBodySet::new(),
             colliders: ColliderSet::new(),
             islands: IslandManager::new(),
@@ -346,13 +358,104 @@ impl Env {
         total / count as f32
     }
 
-    /// Avanza el mundo un paso de `config::SIM_DT`.
+    /// Avanza el mundo un paso de `config::SIM_DT`, sin que nadie lo pilote.
+    /// Es lo que usa el sandbox.
     pub fn step(&mut self, backend: &mut dyn FieldBackend) {
+        self.step_with(&[], backend);
+    }
+
+    /// Avanza el mundo un paso aplicando `actions`.
+    ///
+    /// `actions` es un `[N, ACTION_DIM]` en C-order **indexado por slot**, no
+    /// por posicion entre los vivos: el hueco que deja un agente borrado se
+    /// queda ahi hasta que otro lo ocupe. Asi la fila `i` del tensor se refiere
+    /// siempre al mismo agente, que es lo que necesita una politica para no
+    /// perderle el hilo. Su `N` es [`Env::slot_capacity`].
+    ///
+    /// Cada componente se interpreta en `[-1, 1]` y el vector se recorta a norma
+    /// 1: una politica puede emitir cualquier numero, y sin el recorte bastaria
+    /// con sacar valores enormes para saltarse el limite de aceleracion.
+    ///
+    /// Pasar un `actions` vacio equivale a no pilotar a nadie.
+    pub fn step_with(&mut self, actions: &[f32], backend: &mut dyn FieldBackend) {
         self.clock.advance();
         self.deposit_heat();
         self.field.step(backend, config::SIM_DT);
         self.apply_brownian_impulse();
+        self.apply_actions(actions);
         self.step_physics();
+        self.collect_rewards();
+    }
+
+    /// Cuantas filas tiene el tensor de acciones y el de recompensas.
+    pub fn slot_capacity(&self) -> usize {
+        self.agents.capacity()
+    }
+
+    /// Recompensa del ultimo paso, indexada por slot. Los slots libres valen 0.
+    pub fn rewards(&self) -> &[f32] {
+        &self.rewards
+    }
+
+    /// Si el episodio ha agotado su duracion.
+    ///
+    /// Es truncado, no terminacion: el mundo no llega a ningun estado final por
+    /// si mismo, simplemente se corta. La diferencia importa al entrenar, porque
+    /// un episodio truncado si admite bootstrap del valor del ultimo estado.
+    pub fn truncated(&self) -> bool {
+        self.clock.step >= config::MAX_EPISODE_STEPS
+    }
+
+    /// Arranca un episodio nuevo: sin cuerpos, con el medio a temperatura de
+    /// fondo y el reloj a cero.
+    ///
+    /// Reiniciar el contador es parte del reset: si siguiera creciendo, dos
+    /// episodios con la misma semilla recibirian ruido distinto.
+    pub fn reset(&mut self, seed: u64) {
+        self.clear_agents();
+        self.field.clear();
+        self.clock.reset(seed);
+        self.rewards.clear();
+    }
+
+    fn apply_actions(&mut self, actions: &[f32]) {
+        if actions.is_empty() {
+            return;
+        }
+
+        for (slot, handle) in self.agents.alive() {
+            let base = slot as usize * ACTION_DIM;
+            let Some(a) = actions.get(base..base + ACTION_DIM) else {
+                continue;
+            };
+
+            let steer = Vec2::new(a[0], a[1]).clamp_length_max(1.0);
+            if steer == Vec2::ZERO {
+                continue;
+            }
+
+            let body = &mut self.bodies[handle];
+            // Escalado por la masa: la accion es una aceleracion, no una fuerza.
+            let magnitude = body.mass() * config::ACTION_ACCEL * config::SIM_DT;
+            body.apply_impulse(steer * magnitude, true);
+        }
+    }
+
+    /// Termotaxis: se premia estar donde el medio esta caliente.
+    ///
+    /// La tarea no es trivial precisamente por como esta hecho este mundo: las
+    /// zonas calientes son las que mas zarandean, asi que quedarse en una exige
+    /// nadar contra un ruido que crece con la propia recompensa. Y como los
+    /// cuerpos calientan el medio al moverse, la senal que persiguen la van
+    /// dejando ellos mismos.
+    fn collect_rewards(&mut self) {
+        self.rewards.clear();
+        self.rewards.resize(self.agents.capacity(), 0.0);
+
+        for (slot, handle) in self.agents.alive() {
+            let excess = self.field.sample(self.bodies[handle].translation()) - self.field.ambient;
+            self.rewards[slot as usize] = excess / config::REWARD_TEMPERATURE_SCALE;
+        }
     }
 
     /// Cuerpos -> campo: el rozamiento con el medio lo calienta.
@@ -547,6 +650,195 @@ mod tests {
                 "el suelo desaparecio: el cuerpo se cayo del recinto"
             );
         }
+    }
+
+    /// Un tensor de acciones lleno del mismo empujon, para pilotar a todos a la
+    /// vez en la misma direccion.
+    fn uniform_action(env: &Env, steer: Vec2) -> Vec<f32> {
+        let mut actions = vec![0.0; env.slot_capacity() * ACTION_DIM];
+        for slot in env.alive_slots() {
+            actions[slot as usize * ACTION_DIM] = steer.x;
+            actions[slot as usize * ACTION_DIM + 1] = steer.y;
+        }
+        actions
+    }
+
+    fn run_with(env: &mut Env, actions: &[f32], steps: u32) {
+        let mut backend = SerialBackend;
+        for _ in 0..steps {
+            env.step_with(actions, &mut backend);
+        }
+    }
+
+    fn mean_x(env: &Env) -> f32 {
+        let xs: Vec<f32> = env.agent_poses().map(|p| p.position.x).collect();
+        xs.iter().sum::<f32>() / xs.len() as f32
+    }
+
+    /// Lo minimo que se le pide a un espacio de accion: que empujar hacia un
+    /// lado lleve a los agentes a ese lado.
+    ///
+    /// Se mide como diferencia entre dos mundos con la misma semilla y la accion
+    /// invertida, no como posicion absoluta. Es deliberado: al compartir semilla
+    /// reciben exactamente el mismo ruido, asi que lo unico que puede separarlos
+    /// es la accion. Mirar una sola trayectoria no serviria — la agitacion
+    /// termica de una pelota de 18 px ronda los 150 px/s, del mismo orden que la
+    /// deriva que imprime [`config::ACTION_ACCEL`], y taparia el efecto.
+    #[test]
+    fn actions_steer_the_agents() {
+        let (mut right, mut left) = (seeded_env(4, 18.0, 8), seeded_env(4, 18.0, 8));
+        let push_right = uniform_action(&right, Vec2::X);
+        let push_left = uniform_action(&left, Vec2::NEG_X);
+
+        run_with(&mut right, &push_right, 400);
+        run_with(&mut left, &push_left, 400);
+
+        let separation = mean_x(&right) - mean_x(&left);
+        assert!(
+            separation > 200.0,
+            "las acciones no dirigen: derecha quedo en {:.0} e izquierda en {:.0}",
+            mean_x(&right),
+            mean_x(&left)
+        );
+    }
+
+    /// Sin recorte, una politica podria emitir un millon y saltarse el limite de
+    /// aceleracion. Con recorte, pedir mas que a fondo no da mas de lo que da ir
+    /// a fondo.
+    #[test]
+    fn actions_are_clamped_to_unit_length() {
+        let mut sane = Env::new(64, 36, 4);
+        sane.spawn_ball(12.0, Vec2::ZERO);
+        let mut greedy = Env::new(64, 36, 4);
+        greedy.spawn_ball(12.0, Vec2::ZERO);
+
+        let at_full = uniform_action(&sane, Vec2::X);
+        let absurd = uniform_action(&greedy, Vec2::X * 1000.0);
+        run_with(&mut sane, &at_full, 150);
+        run_with(&mut greedy, &absurd, 150);
+
+        assert_eq!(
+            sane.agent_position(0),
+            greedy.agent_position(0),
+            "una accion desmedida logro mas que una a fondo"
+        );
+    }
+
+    /// Un `actions` vacio tiene que dejar el mundo exactamente como lo dejaria
+    /// `step`. Es lo que permite que el sandbox siga usando el mismo `Env`.
+    #[test]
+    fn empty_actions_match_the_unpiloted_step() {
+        let (mut piloted, mut free) = (seeded_env(8, 14.0, 4), seeded_env(8, 14.0, 4));
+        run_with(&mut piloted, &[], 200);
+        run(&mut free, 200);
+
+        assert_eq!(positions(&piloted), positions(&free));
+    }
+
+    /// La recompensa tiene que seguir a la temperatura del sitio donde esta el
+    /// agente; si no, no hay termotaxis que aprender.
+    ///
+    /// El cuerpo es grande y el chorro de calor, moderado, y las dos cosas por
+    /// el mismo motivo: calentar una celda multiplica la sacudida que recibe
+    /// quien esta en ella —el impulso va como `sqrt(T)`—, de modo que un chorro
+    /// generoso sobre un cuerpo ligero lo expulsa de su propia zona caliente
+    /// antes de que se pueda medir nada.
+    #[test]
+    fn reward_tracks_the_local_temperature() {
+        let mut env = Env::new(64, 36, 4);
+        env.spawn_ball(30.0, Vec2::ZERO);
+        let mut backend = SerialBackend;
+
+        env.step(&mut backend);
+        let cold = env.rewards()[0];
+
+        for _ in 0..30 {
+            let here = env.agent_position(0).expect("sigue vivo");
+            env.field.deposit(here, 20.0);
+            env.step(&mut backend);
+        }
+        let hot = env.rewards()[0];
+
+        assert!(
+            hot > cold + 0.1,
+            "calentar la celda del agente no subio su recompensa: {cold:.3} -> {hot:.3}"
+        );
+    }
+
+    /// Los slots libres no participan, y su fila del tensor queda a cero en vez
+    /// de arrastrar el ultimo valor del agente que estuvo ahi.
+    #[test]
+    fn rewards_are_indexed_by_slot_and_zero_for_free_ones() {
+        let mut env = Env::new(64, 36, 4);
+        let a = env.spawn_ball(30.0, Vec2::new(-200.0, 0.0));
+        let b = env.spawn_ball(30.0, Vec2::new(200.0, 0.0));
+        let mut backend = SerialBackend;
+
+        // Calor moderado y cuerpos grandes, por lo mismo que en el test
+        // anterior: un chorro fuerte expulsaria a `b` de la zona que se le esta
+        // calentando y la comprobacion pasaria o fallaria por azar.
+        for _ in 0..30 {
+            let here = env.agent_position(b).expect("sigue vivo");
+            env.field.deposit(here, 20.0);
+            env.step(&mut backend);
+        }
+        assert!(
+            env.rewards()[b as usize] > env.rewards()[a as usize],
+            "el agente en la zona caliente no cobra mas: {:.3} frente a {:.3}",
+            env.rewards()[b as usize],
+            env.rewards()[a as usize]
+        );
+
+        env.despawn(b);
+        env.step(&mut backend);
+        assert_eq!(env.rewards().len(), env.slot_capacity());
+        assert_eq!(
+            env.rewards()[b as usize],
+            0.0,
+            "el slot libre sigue cobrando"
+        );
+    }
+
+    /// El episodio se corta solo, y `reset` lo deja como recien empezado.
+    #[test]
+    fn episodes_truncate_and_reset() {
+        let mut env = Env::new(32, 18, 4);
+        env.spawn_ball(12.0, Vec2::ZERO);
+        assert!(!env.truncated());
+
+        let mut backend = SerialBackend;
+        for _ in 0..config::MAX_EPISODE_STEPS {
+            env.step(&mut backend);
+        }
+        assert!(env.truncated());
+
+        env.reset(4);
+        assert!(!env.truncated());
+        assert_eq!(env.agent_count(), 0);
+        assert_eq!(env.clock.step, 0);
+        assert_eq!(env.field.mean_temperature(), env.field.ambient);
+    }
+
+    /// Dos episodios que arrancan con `reset(seed)` desde estados distintos
+    /// tienen que ser indistinguibles. Es lo que permite reproducir un fallo de
+    /// entrenamiento sin guardar el mundo entero.
+    #[test]
+    fn reset_makes_episodes_reproducible() {
+        let mut env = Env::new(64, 36, 1);
+        env.spawn_ball(12.0, Vec2::new(-200.0, 100.0));
+        run(&mut env, 300);
+
+        env.reset(77);
+        env.spawn_ball(14.0, Vec2::new(50.0, 150.0));
+        run(&mut env, 250);
+        let first = positions(&env);
+
+        let mut fresh = Env::new(64, 36, 999);
+        fresh.reset(77);
+        fresh.spawn_ball(14.0, Vec2::new(50.0, 150.0));
+        run(&mut fresh, 250);
+
+        assert_eq!(first, positions(&fresh), "reset no dejo el mundo igual");
     }
 
     /// Los slots se reutilizan, que es lo que mantiene acotado el `N` que vera

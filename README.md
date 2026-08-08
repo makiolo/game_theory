@@ -109,9 +109,20 @@ crates/
 
 ## Hacia dónde va
 
-El siguiente paso es convertir el sandbox en un entorno de aprendizaje por
-refuerzo multi-agente, con la simulación extraída a una librería sin Bevy y
-expuesta a PyTorch sin copias. El plan completo está en
+El sandbox se está convirtiendo en un entorno de aprendizaje por refuerzo
+multi-agente. La simulación ya vive en una librería sin Bevy y acepta acciones:
+
+```rust
+env.step_with(&actions, backend);   // [N, 2] indexado por slot
+env.rewards();                      // termotaxis: se premia el calor local
+```
+
+La tarea tiene gracia precisamente por cómo está hecho este mundo: las zonas
+calientes son las que más zarandean, así que quedarse en una exige nadar contra
+un ruido que crece con la propia recompensa — y el rastro de calor que persiguen
+los agentes lo van dejando ellos mismos al moverse.
+
+Falta el puente con PyTorch. El plan completo está en
 [`docs/rl-integration-plan.md`](docs/rl-integration-plan.md).
 
 ## Tests

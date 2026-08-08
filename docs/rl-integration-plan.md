@@ -236,13 +236,63 @@ una vez por clic, y siempre correcto. Fijado en
 falta el espacio de acción de la Fase 2 antes de que una política pueda tocar
 nada.
 
-### Fase 2 — Agentes y espacio de acción
+### Fase 2 — Espacio de acción y recompensa ✅
 
-- `AgentTable` SoA con slots reciclables (§3.2).
-- Acción continua `Box(-1, 1, shape=(N, 2))`: un impulso dirigido que **se suma**
-  al browniano en vez de sustituirlo. Mantiene la física intacta y obliga a la
-  política a trabajar contra el ruido, que es lo interesante del dominio.
-- Recompensa calculada en Rust, dentro del step.
+`Env::step_with(actions, backend)`. `actions` es un `[N, 2]` en C-order
+**indexado por slot**, con `N = Env::slot_capacity()` — el hueco que deja un
+agente borrado se queda ahí hasta que otro lo ocupe, para que la fila `i` se
+refiera siempre al mismo agente. Cada vector se recorta a norma 1: una política
+puede emitir cualquier número, y sin recorte bastaría con sacar valores enormes
+para saltarse el límite de aceleración.
+
+**La acción es una aceleración, no una fuerza** — se escala por la masa. Así
+todos los tamaños tienen la misma autoridad sobre sí mismos, mientras que el
+ruido, que va como `sqrt(T/m)`, zarandea mucho más a los pequeños. De esa
+asimetría sale lo interesante: un cuerpo grande se dirige con facilidad pero le
+cuesta arrancar; uno pequeño es ágil y a la vez esclavo del ruido.
+
+`ACTION_ACCEL = 400 px/s²` está calibrado contra el propio medio: con
+`LINEAR_DAMPING` deja la deriva en ~160 px/s, y la agitación térmica de una
+pelota de 18 px ronda los 150 px/s. Si la acción pudiera mucho más que el baño,
+la política aprendería a ignorar el medio, que es justo lo que hay que evitar.
+
+**Recompensa: termotaxis.** Se premia estar donde el medio está caliente,
+`(T_local − ambient) / REWARD_TEMPERATURE_SCALE`. La tarea no es trivial por cómo
+está hecho este mundo: las zonas calientes son las que más zarandean, así que
+quedarse en una exige nadar contra un ruido que crece con la propia recompensa. Y
+como los cuerpos calientan el medio al moverse, la señal que persiguen la van
+dejando ellos mismos.
+
+Es la decisión más fácil de cambiar de todo el plan — una función — así que queda
+como punto de partida, no como conclusión.
+
+También: `reset(seed)` y `truncated()`. Es truncado, no terminación: el mundo no
+llega a ningún estado final por sí mismo. La diferencia importa al entrenar,
+porque un episodio truncado sí admite bootstrap del valor del último estado.
+
+**Lo que enseñó calibrar esto.** Dos tests fallaron al escribirlos, y por el
+mismo motivo físico: calentar la celda de un cuerpo multiplica la sacudida que
+recibe, de modo que **un chorro de calor generoso expulsa al cuerpo de su propia
+zona caliente** antes de poder medir nada. Con 200 unidades sobre una bola de
+12 px, el impulso se multiplica por ~14 y salta 260 px en 10 pasos. Los tests de
+recompensa usan ahora cuerpos grandes y calor moderado.
+
+El de acciones falló por lo contrario: mirando una sola trayectoria, el ruido
+(~210 px/s RMS para `r=12`) tapaba la deriva. Se mide como diferencia entre dos
+mundos con la **misma semilla** y la acción invertida — mismo ruido exacto, así
+que lo único que puede separarlos es la acción.
+
+> **Criterio:** 29 tests verdes, clippy limpio, la app sigue funcionando (un
+> `actions` vacío equivale al paso sin pilotar, y eso está fijado en
+> `empty_actions_match_the_unpiloted_step`).
+
+### Fase 2b — Pendiente antes de la Fase 3
+
+El `AgentTable` SoA con columnas `pos`/`vel`/`mass`/`cell` cacheadas (§3.2) sigue
+sin hacerse: hoy `deposit_heat`, el impulso y la recompensa resuelven la celda
+por separado. Es optimización, no corrección — el orden ya es determinista porque
+`Agents::alive()` recorre por slot — así que espera a que el rasterizado de la
+Fase 3 lo haga rentable.
 
 ### Fase 3 — Observaciones (§3.3)
 
