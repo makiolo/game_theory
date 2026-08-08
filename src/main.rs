@@ -52,7 +52,7 @@ fn main() {
         ))
         .insert_resource(ClearColor(config::BACKGROUND))
         .init_resource::<ThermalField>()
-        .init_resource::<BackendKind>()
+        .insert_resource(BackendKind::from_args())
         .init_resource::<coupling::FieldStats>()
         .init_resource::<coupling::BrownianRng>()
         .init_resource::<spawn::SpawnSettings>()

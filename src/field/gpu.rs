@@ -109,8 +109,8 @@ impl GpuBackend {
 
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("brownian_diffuse_pipeline_layout"),
-            bind_group_layouts: &[&layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_compute_pipeline(&RawComputePipelineDescriptor {
@@ -304,7 +304,7 @@ impl FieldBackend for GpuBackend {
             let _ = tx.send(r);
         });
 
-        if self.device.poll(PollType::Wait).is_err() {
+        if self.device.poll(PollType::wait_indefinitely()).is_err() {
             error!("la GPU no respondio al esperar el campo termico");
             return;
         }
